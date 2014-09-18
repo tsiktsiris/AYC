@@ -161,6 +161,7 @@ int main(int argc, char* argv[]){
 		//Iterate over some possible scales (you can add more steps and you can also check rotations)
 		//The sample is really simple because you have to create a good algorithm able to match
 		//a pattern in an image
+		#pragma omp parallel for
 		for(unsigned int s=1; s<=parameters.max_scale; s++){
 			//Create a scaled image
 			Accelerate::Image temp = template_image.scale_image(s);
