@@ -175,11 +175,10 @@ int main(int argc, char* argv[]){
 						result.pattern_ID = template_id;
 						result.position_x = wm;
 						result.position_y = hm;
-						result_list.push_back(result);		
+						result_list.push_back(result);
 					}
 				}
-			} 
-	
+			}
 		}
 	}
 	//sort the result list
