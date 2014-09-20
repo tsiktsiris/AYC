@@ -59,7 +59,7 @@
 
 #include <iostream>
 #include "BitmapImporter.h"
-#include <omp.h>
+#include <mpi.h>
 #include <string>
 #include <list>
 
@@ -93,7 +93,7 @@ typedef struct{
  * \param w the coloumn number.
  * \return template has been found at position [h,w] in the main image.  
  */
-bool match_template(const Accelerate::Image& main_image, const Accelerate::Image& template_image, unsigned int h, unsigned int w);
+bool match_template(const Accelerate::Image& main_image, const Accelerate::Image& template_image, unsigned int h, unsigned int w,int rank, int size);
 
 /*!
  * \brief Read the parameters
@@ -114,7 +114,7 @@ bool compare_results(Result& first, Result& second){
 	if(first.position_y < second.position_y) return true;
 	else if(first.position_y > second.position_y) return false;
 
-	return true;	
+	return true;
 }
 
 bool read_parameters(int argc, char* argv[], Parameters& parameters){
@@ -131,29 +131,63 @@ bool read_parameters(int argc, char* argv[], Parameters& parameters){
 	for(unsigned int i=4; i<argc; i++){
 		parameters.template_names.push_back(string(argv[i]));
 	}
-	return true;	
+	return true;
 }
 
 int main(int argc, char* argv[]){
 	if(argc<=1) return 0;
 	if(argv == NULL) return 0;
 
+	int ierr,rank,size;
+
+	MPI_Init(&argc, &argv);
+
+	ierr = MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	ierr = MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+	/* create a type for result struct */
+	const int nitems=3;
+	int          blocklengths[3] = {1,1,1};
+	MPI_Datatype types[3] = {MPI_INT, MPI_INT, MPI_INT};
+	MPI_Datatype mpi_result_type;
+	MPI_Aint     offsets[3];
+
+	offsets[0] = offsetof(Result, pattern_ID);
+	offsets[1] = offsetof(Result, position_x);
+	offsets[2] = offsetof(Result, position_y);
+
+	MPI_Type_create_struct(nitems, blocklengths, offsets, types, &mpi_result_type);
+	MPI_Type_commit(&mpi_result_type);
+
 	Parameters parameters;
 	list<Result> result_list;
+
 	if(!read_parameters(argc, argv, parameters)){
-		cout<<"Wrong number of parameters or invalid parameters..."<<endl;
-		cout<<"The program must be called with the following parameters:"<<endl;
-		cout<<"\t- num_threads: The number of threads"<<endl;
-		cout<<"\t- max_scale: The maximum scale that can be applied to the templates in the main image"<<endl;
-		cout<<"\t- main_image: The main image path"<<endl;
-		cout<<"\t- t1 ... tn: The list of the template paths. Each template separated by a space"<<endl;
-		cout<<endl<<"For example : ./run 4 3 img.bmp template1.bmp template2.bmp"<<endl;
-		return -1;
+		if(rank==0)
+		{
+			cout<<"Wrong number of parameters or invalid parameters..."<<endl;
+			cout<<"The program must be called with the following parameters:"<<endl;
+			cout<<"\t- num_threads: The number of threads"<<endl;
+			cout<<"\t- max_scale: The maximum scale that can be applied to the templates in the main image"<<endl;
+			cout<<"\t- main_image: The main image path"<<endl;
+			cout<<"\t- t1 ... tn: The list of the template paths. Each template separated by a space"<<endl;
+			cout<<endl<<"For example : ./run 4 3 img.bmp template1.bmp template2.bmp"<<endl;
+			MPI_Finalize();
+			return -1;
+		}
+		else
+		{
+			MPI_Finalize();
+			return -1;
+		}
 	}
 	//Read the main image
 	Accelerate::Image main_image = Accelerate::Image::create_image_from_bitmap(parameters.main_image_name);
 	//iterates over the pattern images
-	for(string temp_name : parameters.template_names){ 
+
+	cout<<"Running at rank "<<rank<<" of "<<size-1<<endl;
+
+	for(string temp_name : parameters.template_names){
 		//Read a specific pattern image
 		Accelerate::Image template_image = Accelerate::Image::create_image_from_bitmap(temp_name);
 		//Then retrieve the ID of the image (the 3 first characters
@@ -161,44 +195,57 @@ int main(int argc, char* argv[]){
 		//Iterate over some possible scales (you can add more steps and you can also check rotations)
 		//The sample is really simple because you have to create a good algorithm able to match
 		//a pattern in an image
-		for(unsigned int s=1; s<=parameters.max_scale; s++){
+		for(unsigned int s=rank+1; s<=(parameters.max_scale/size-1)*(rank+1); s++){
 			//Create a scaled image
 			Accelerate::Image temp = template_image.scale_image(s);
-			//iterates on the main image pixels
-			for(unsigned int wm=0; wm<main_image.get_width(); wm++){
+
+			for(unsigned int wm=(main_image.get_width()/(size-1))*rank; wm<=(main_image.get_width()/(size-1))*(rank+1); wm++){
 				for(unsigned int hm=0; hm<main_image.get_height(); hm++){
 					//Try to match the template
-					if(match_template(main_image, temp, hm, wm)){
+					if(match_template(main_image, temp, hm, wm,rank,size)){
 						//The pattern image has been found so save the result
 						Result result;
 						result.pattern_ID = template_id;
-						result.position_x = wm;
+
+						if(wm > (main_image.get_width()/(size-1)))
+							result.position_x = wm - (main_image.get_width()/(size-1));
+						else
+							result.position_x = wm;
+
 						result.position_y = hm;
-						result_list.push_back(result);		
+
+						if(rank==0)
+						{
+							Result recv;
+							MPI_Status status;
+							MPI_Recv(&recv, 1 , mpi_result_type, MPI_ANY_SOURCE, 13, MPI_COMM_WORLD, &status);
+						}
+						else
+							ierr = MPI_Send( &result, 1 , mpi_result_type , 0 , 13, MPI_COMM_WORLD);
+
+						cout<<result.pattern_ID<<"\t"<<result.position_x<<"\t"<<result.position_y<<endl;
+
 					}
 				}
-			} 
-	
+			}
+
 		}
 	}
-	//sort the result list
-	result_list.sort(compare_results);
-	//Print the results
-	for(Result res : result_list){
-		cout<<res.pattern_ID<<"\t"<<res.position_x<<"\t"<<res.position_y<<endl;
-	}
 
+
+	MPI_Finalize();
 	return 0;
 }
 
 
 
-bool match_template(const Accelerate::Image& main_image, const Accelerate::Image& template_image, unsigned int h, unsigned int w){
+bool match_template(const Accelerate::Image& main_image, const Accelerate::Image& template_image, unsigned int h, unsigned int w, int rank, int size){
 	//The next cases are not possible
 	if(main_image.get_width() - w < template_image.get_width()) return false;
 	if(main_image.get_height() - h < template_image.get_height()) return false;
 	//Iterates over the pattern and compare each pixel with the pixels of the main image
 	for(unsigned int wt=0; wt<template_image.get_width(); wt++){
+	 //for(unsigned int wt=(main_image.get_width()/(size-1))*rank; wt<(main_image.get_width()/(size-1))*(rank+1); wt++){
 		for(unsigned int ht=0; ht<template_image.get_height(); ht++){
 			//If a single pixel do not match, we return false
 			//You can also improve this part of the algorithm as some images can have different contrasts,
